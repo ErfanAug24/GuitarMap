@@ -52,12 +52,12 @@ class GuitarAnalysisPipeline:
 
         print("Mapping notes to tab...")
         tabs = self.tab_mapper.map_sequence(notes)
-
+        export_tabs = [tab.model_dump() for tab in tabs]
         base_name = export_name or file_path.split("/")[-1].split(".")[0]
         print("Exporting results...")
-        json_path = self.exporter.to_json(tabs, filename=f"{base_name}.json")
-        csv_path = self.exporter.to_csv(tabs, filename=f"{base_name}.csv")
-        mid_path = self.exporter.to_midi(tabs, filename=f"{base_name}.mid")
+        json_path = self.exporter.to_json(export_tabs, filename=f"{base_name}.json")
+        csv_path = self.exporter.to_csv(export_tabs, filename=f"{base_name}.csv")
+        mid_path = self.exporter.to_midi(export_tabs, filename=f"{base_name}.mid")
 
         print("Pipeline complete.")
         return {"json":json_path,

@@ -27,9 +27,8 @@ def test_detect_normal_wave(default_detector):
 
 def test_detect_empty_wave(default_detector):
     audio = np.array([])
-    onsets = default_detector.detect(audio)
-    assert isinstance(onsets, np.ndarray)
-    assert len(onsets) == 0
+    with pytest.raises(ValueError, match="Empty or invalid waveform"):
+        default_detector.detect(audio)
 
 
 def test_detect_short_wave(default_detector):

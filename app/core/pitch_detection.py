@@ -1,6 +1,11 @@
 import numpy as np
 import librosa
-from typing import List, Union
+from typing import List, Union, Optional
+
+from app.config.settings import settings
+from app.utils.logging_config import get_logger
+from app.utils.timing import timing
+from app.models.segment import NoteSegment
 
 NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F',
               'F#', 'G', 'G#', 'A', 'A#', 'B']
@@ -12,17 +17,26 @@ class PitchDetector:
     Designed for monophonic guitar signals.
     """
 
-    def __init__(self, sr: int = 44100, fmin: float = 80.0, fmax: float = 1200.0):
-        """
-        :param sr: (int) Sample rate of the audio.
-        :param fmin: (float) Minimum frequency to consider (E2 ≈ 82 Hz for guitar).
-        :param fmax: (float) Maximum frequency to consider (around 1200 Hz covers high frets).
-        """
-        self.sr = sr
-        self.fmin = fmin
-        self.fmax = fmax
+    def __init__(
+            self,
+            sr: Optional[int] = None,
+            fmin: Optional[float] = None,
+            fmax: Optional[float] = None,
+            silence_threshold: float = 0.01,
+            smoothing_window: int = 3
+    ):
+        cfg_sr = sr or settings.SAMPLE_RATE
+        self.sr = cfg_sr
+        self.fmin = fmin or 80.0
+        self.fmax = fmax or 1200.0
+        self.silence_threshold = silence_threshold
+        self.smoothing_window = smoothing_window
 
-    def detect(self, waveform: np.ndarray, frame_length: int = 2048, hop_length: int = 256) -> List[dict]:
+        self.log = get_logger(__name__)
+        self.log.debug(f"PitchDetector initialized: sr={self.sr}, fmin={self.fmin}, fmax={self.fmax}")
+
+    @timing
+    def detect(self, waveform: np.ndarray, frame_length: int = 2048, hop_length: int = 256) -> List[NoteSegment]:
         """
         Perform continuous pitch detection over the audio.
 
@@ -31,28 +45,55 @@ class PitchDetector:
         :param hop_length:  (int) Step size between analysis frames.
         :return: (list[dict]) Each dict contains {'time': float, 'freq': float, 'note': str}
         """
+        if waveform.size == 0:
+            return []
+        if waveform.ndim > 1:
+            waveform = np.mean(waveform, axis=1)
+            self.log.debug("Converted stereo to mono for pitch detection.")
+
+            # Normalize waveform safely
+        max_val = np.max(np.abs(waveform))
+        if max_val > 0:
+            waveform = waveform / max_val
+
+        self.log.info(f"Running pitch detection (fmin={self.fmin}, fmax={self.fmax}, sr={self.sr})")
+
         pitches, magnitudes = librosa.piptrack(y=waveform, sr=self.sr, fmin=self.fmin, fmax=self.fmax,
                                                hop_length=hop_length)
-        pitch_data = []
+        rms = librosa.feature.rms(y=waveform, frame_length=frame_length, hop_length=hop_length)[0]
+        frequencies = np.zeros(pitches.shape[1])
         for i in range(pitches.shape[1]):
-            index = magnitudes[:, i].argmax()
-            freq = pitches[index, i]
+            if rms[i] > self.silence_threshold:
+                idx = magnitudes[:, i].argmax()
+                freq = pitches[idx, i]
+                frequencies[i] = freq if freq > 0 else 0
+
+        if self.smoothing_window > 1:
+            frequencies = self._smooth(frequencies, self.smoothing_window)
+
+        segments: List[NoteSegment] = []
+        for i, freq in enumerate(frequencies):
             if freq > 0:
                 note_name = self.freq_to_note_name(freq)
                 time = librosa.frames_to_time(i, sr=self.sr, hop_length=hop_length)
-                pitch_data.append({'time': float(time), 'freq': float(freq), 'note': note_name})
-        return pitch_data
+                note_seg = NoteSegment(time=float(time), freq=float(freq), note=note_name)
+                segments.append(note_seg)
+
+        self.log.info(f"Detected {len(segments)} note events.")
+        return segments
 
     @staticmethod
     def freq_to_note_name(freq: float) -> Union[str, None]:
-        """
-        Convert a frequency to its nearest note name.
-        :param freq: (float) Frequency to convert.
-        :return: (str) Note name.
-        """
         if freq <= 0:
             return None
         note_num = 12 * np.log2(freq / 440.0) + 69
         note_index = int(round(note_num)) % 12
-        octave = int(round(note_num / 12)) - 1
+        octave = int(note_num // 12) - 1
         return f"{NOTE_NAMES[note_index]}{octave}"
+
+    @staticmethod
+    def _smooth(values: np.ndarray, window: int) -> np.ndarray:
+        """Simple moving average smoothing."""
+        if len(values) < window:
+            return values
+        return np.convolve(values, np.ones(window) / window, mode="same")
